@@ -37,44 +37,50 @@ def check_login(username, password, sh):
 def get_project_names(sh):
     ws = sh.worksheet("DB_Respirometria")
     try:
-        # Colonna B è Project_Name
-        col_vals = ws.col_values(2)
+        col_vals = ws.col_values(2) # Colonna B è Project_Name
         if len(col_vals) > 1:
             return sorted(list(set(col_vals[1:])))
     except:
         pass
     return []
 
+def get_all_unique_tags(sh):
+    """Recupera TUTTI i tag mai usati in tutto il database per suggerirli"""
+    ws = sh.worksheet("DB_Respirometria")
+    try:
+        # Colonna G (7) è Custom_Tags_JSON
+        raw_data = ws.col_values(7)
+        unique_tags = set()
+        for item in raw_data[1:]: # Salta header
+            if item and item != "{}":
+                try:
+                    js = json.loads(item)
+                    unique_tags.update(js.keys())
+                except: pass
+        return sorted(list(unique_tags))
+    except:
+        return []
+
 def get_tags_for_specific_project(sh, project_name):
-    """
-    Recupera i tag custom usati SOLO in un determinato progetto.
-    """
+    """Recupera i tag usati SOLO in un progetto specifico"""
     ws = sh.worksheet("DB_Respirometria")
     try:
         data = ws.get_all_records()
         df = pd.DataFrame(data)
         if df.empty: return []
-        
-        # Filtra per progetto
         subset = df[df['Project_Name'] == project_name]
-        
         unique_tags = set()
         for val in subset['Custom_Tags_JSON']:
             if val and val != "{}":
                 try:
                     data_json = json.loads(val)
                     unique_tags.update(data_json.keys())
-                except:
-                    pass
+                except: pass
         return list(unique_tags)
     except:
         return []
 
 def check_todays_data_for_project(sh, project_name, username):
-    """
-    Controlla se ci sono dati di OGGI per questo specifico progetto e utente.
-    Ritorna True se trova dati APERTI di oggi.
-    """
     ws = sh.worksheet("DB_Respirometria")
     try:
         data = ws.get_all_records()
@@ -82,15 +88,12 @@ def check_todays_data_for_project(sh, project_name, username):
         if df.empty: return False
         
         today_str = datetime.now().strftime("%Y-%m-%d")
-        
-        # Filtra: Utente + Progetto + Data Oggi + Stato Aperto
         subset = df[ 
             (df['Operatore'] == username) & 
             (df['Project_Name'] == project_name) &
             (df['Data'] == today_str) &
             (df['Stato'] != 'CHIUSO')
         ]
-        
         return not subset.empty
     except:
         return False
@@ -124,7 +127,7 @@ def clear_session_state(username, sh):
         pass
 
 # --- UI SETUP ---
-st.set_page_config(page_title="Lab Dashboard V3", layout="wide", page_icon="🔬")
+st.set_page_config(page_title="Lab Dashboard V2.1", layout="wide", page_icon="🔬")
 st.title("🔬 Respirometria Lab")
 
 if 'logged_in' not in st.session_state: st.session_state.logged_in = False
@@ -133,6 +136,7 @@ if 'choice_made' not in st.session_state: st.session_state.choice_made = False
 if 'work_mode' not in st.session_state: st.session_state.work_mode = "NEW"
 if 'active_tags' not in st.session_state: st.session_state.active_tags = []
 if 'selected_project_memory' not in st.session_state: st.session_state.selected_project_memory = ""
+if 'all_possible_tags' not in st.session_state: st.session_state.all_possible_tags = []
 
 # --- 1. LOGIN ---
 if not st.session_state.logged_in:
@@ -147,6 +151,8 @@ if not st.session_state.logged_in:
                     st.session_state.logged_in = True
                     st.session_state.username = user
                     st.session_state.real_name = real_name
+                    # Pre-carica tutti i tag possibili all'avvio per velocità
+                    st.session_state.all_possible_tags = get_all_unique_tags(sh)
                     st.rerun()
                 else:
                     st.error("Credenziali Errate")
@@ -158,12 +164,13 @@ if not st.session_state.logged_in:
 try:
     sh = get_connection()
 except:
-    st.error("Persa connessione. Ricarica.")
+    st.error("Connessione persa.")
     st.stop()
 
 st.sidebar.write(f"Operatore: **{st.session_state.real_name}**")
 if st.sidebar.button("Logout"):
     st.session_state.logged_in = False
+    st.session_state.choice_made = False
     st.rerun()
 
 menu = st.sidebar.radio("Menu", ["1. Misurazione (Day 0)", "2. Pesi (Day 3)", "3. Export Dati"])
@@ -173,7 +180,7 @@ menu = st.sidebar.radio("Menu", ["1. Misurazione (Day 0)", "2. Pesi (Day 3)", "3
 # =============================================================================
 if menu == "1. Misurazione (Day 0)":
     
-    # Check Iniziale Timer Globale
+    # Check Iniziale Timer
     if not st.session_state.choice_made:
         cloud_time, cloud_proj = load_session_state(st.session_state.username, sh)
         if cloud_time:
@@ -183,66 +190,56 @@ if menu == "1. Misurazione (Day 0)":
             st.session_state.choice_made = True
             st.rerun()
         else:
-            # Se non c'è timer, andiamo in modalità NEW ma lasceremo all'utente scegliere il progetto
             st.session_state.work_mode = "NEW"
             st.session_state.choice_made = True
 
-    # --- MODALITÀ "NUOVO SET / SCELTA PROGETTO" ---
+    # --- MODALITÀ NUOVO SET ---
     if st.session_state.work_mode == "NEW":
         st.subheader("Setup Esperimento")
         
-        # --- A. SELEZIONE PROGETTO & INTELLIGENZA ---
+        # A. Progetto
         c_p1, c_p2 = st.columns(2)
-        
         with c_p1:
             projs = get_project_names(sh)
             mode_p = st.radio("Cartella / Progetto", ["Esistente", "Nuova"], horizontal=True)
             
             proj_name = ""
-            
             if mode_p == "Esistente":
                 if projs:
                     proj_name = st.selectbox("Seleziona Cartella:", projs)
                     
-                    # LOGICA DI CONTROLLO AL CAMBIO DI PROGETTO
                     if proj_name != st.session_state.selected_project_memory:
-                        # 1. Carica i tag usati in questo progetto
                         tags = get_tags_for_specific_project(sh, proj_name)
-                        st.session_state.active_tags = tags
+                        st.session_state.active_tags = tags # Imposta i default per questo progetto
                         st.session_state.selected_project_memory = proj_name
-                        st.toast(f"Caricati parametri per {proj_name}: {tags}")
                         
-                        # 2. Controlla se ci sono dati di OGGI
                         if check_todays_data_for_project(sh, proj_name, st.session_state.username):
                             st.session_state.alert_today = True
                         else:
                             st.session_state.alert_today = False
-                            
                 else:
-                    st.warning("Nessuna cartella trovata. Creane una nuova.")
+                    st.warning("Crea una nuova cartella.")
             else:
                 proj_name = st.text_input("Nome Nuova Cartella", placeholder="Es. Trota_2024")
-                st.session_state.active_tags = [] # Reset tag per nuovo progetto
-                st.session_state.alert_today = False
+                # Non resettiamo active_tags qui, lasciamo che l'utente scelga
 
-        # --- AVVISO INTELLIGENTE "DATI DI OGGI" ---
+        # Avviso Dati Oggi
         if st.session_state.get('alert_today', False) and mode_p == "Esistente":
-            st.warning(f"⚠️ Attenzione: Ho trovato dati aperti di **OGGI** nella cartella **{proj_name}**.")
+            st.warning(f"⚠️ Ci sono dati aperti di **OGGI** in **{proj_name}**.")
             col_warn1, col_warn2 = st.columns(2)
-            if col_warn1.button("📂 APRI I DATI DI OGGI (Resume)", use_container_width=True, type="primary"):
+            if col_warn1.button("📂 APRI QUELLI DI OGGI", use_container_width=True, type="primary"):
                 st.session_state.work_mode = "RESUME"
                 st.rerun()
-            if col_warn2.button("➕ NO, AGGIUNGI NUOVI ANIMALI", use_container_width=True):
-                st.session_state.alert_today = False # Nascondi avviso e prosegui
+            if col_warn2.button("➕ NO, NUOVI ANIMALI", use_container_width=True):
+                st.session_state.alert_today = False
                 st.rerun()
 
-        # --- SE PROSEGUIAMO COL NUOVO SET ---
         with c_p2:
             num_animali = st.number_input("N. Animali", 1, 30, 5)
 
         st.markdown("---")
         
-        # --- B. TIMER ---
+        # B. Timer
         col_t1, col_t2, col_t3 = st.columns([1,1,2])
         current_time_val = 0.0
         
@@ -266,16 +263,26 @@ if menu == "1. Misurazione (Day 0)":
                 if 'final_time' in st.session_state: del st.session_state['final_time']
                 st.rerun()
 
-        # --- C. PARAMETRI AMBIENTALI (Auto-caricati) ---
+        # C. Parametri Ambientali (Con Multi-Select)
         st.markdown("##### 🌡️ Parametri")
-        c_fix1, c_fix2, c_fix3 = st.columns(3)
+        c_fix1, c_fix2 = st.columns(2)
         with c_fix1: temp = st.number_input("Temp (°C)", value=20.0)
         with c_fix2: press = st.number_input("Pressione (mBar)", value=1013.0)
         
-        with c_fix3:
-            new_tag = st.text_input("Aggiungi Parametro Extra", placeholder="es. Salinità...")
-            if new_tag and new_tag not in st.session_state.active_tags:
-                st.session_state.active_tags.append(new_tag)
+        st.write("---")
+        st.write("###### 🏷️ Filtri / Categorie Extra")
+        
+        # GESTIONE FILTRI DINAMICA (MULTISELECT)
+        # Permette di aggiungere, rimuovere e selezionare da lista esistente
+        selected_tags = st.multiselect(
+            "Aggiungi o Rimuovi Parametri:",
+            options=st.session_state.all_possible_tags, # Suggerisce tutti quelli usati nel DB
+            default=st.session_state.active_tags,       # Pre-seleziona quelli del progetto
+            placeholder="Seleziona o scrivi e premi Invio..."
+        )
+        
+        # Aggiorniamo lo stato con la selezione corrente
+        st.session_state.active_tags = selected_tags
         
         # Renderizza Input Dinamici
         dynamic_values = {}
@@ -283,12 +290,12 @@ if menu == "1. Misurazione (Day 0)":
             cols_dyn = st.columns(4)
             for i, tag in enumerate(st.session_state.active_tags):
                 with cols_dyn[i % 4]:
-                    val = st.text_input(tag, key=f"dyn_{tag}")
+                    val = st.text_input(f"{tag}", key=f"dyn_{tag}")
                     dynamic_values[tag] = val
 
         st.markdown("---")
 
-        # --- D. TABELLE ---
+        # D. Tabelle
         c_set, _ = st.columns(2)
         with c_set:
             set_falcon = st.selectbox("Set Falcon", list(FALCON_DATASETS.keys()))
@@ -380,18 +387,16 @@ if menu == "1. Misurazione (Day 0)":
         data = ws_db.get_all_records()
         df = pd.DataFrame(data)
         
-        # Filtra solo i miei aperti
-        df_open = df[ (df['Operatore'] == st.session_state.username) & 
-                      (df['Stato'] != 'CHIUSO') ].copy()
+        df_open = df[ (df['Operatore'] == st.session_state.username) & (df['Stato'] != 'CHIUSO') ].copy()
         
         if df_open.empty:
-            st.success("Nessun esperimento aperto trovato!")
+            st.success("Tutto chiuso!")
             if st.button("Torna al Menu"):
                 st.session_state.work_mode = "NEW"
                 st.rerun()
         else:
             progetti_aperti = df_open['Project_Name'].unique()
-            st.info(f"Stai lavorando su: {', '.join(progetti_aperti)}")
+            st.info(f"Progetti Aperti: {', '.join(progetti_aperti)}")
 
             cols = ["ID_Univoco", "ID_Animale", "SMR_1", "SMR_2", "Note", "Stato"]
             edited_resume = st.data_editor(
@@ -405,9 +410,9 @@ if menu == "1. Misurazione (Day 0)":
                 }
             )
             
-            c_save1, c_save2 = st.columns(2)
-            if c_save1.button("💾 AGGIORNA PARZIALE"):
-                progress = st.progress(0)
+            c_s1, c_s2 = st.columns(2)
+            if c_s1.button("💾 AGGIORNA PARZIALE"):
+                prog = st.progress(0)
                 tot = len(edited_resume)
                 for idx, row in edited_resume.iterrows():
                     cell = ws_db.find(str(row['ID_Univoco']))
@@ -416,13 +421,13 @@ if menu == "1. Misurazione (Day 0)":
                     ws_db.update_cell(r, 19, row['SMR_2'])
                     ws_db.update_cell(r, 23, row['Note'])
                     ws_db.update_cell(r, 25, row['Stato'])
-                    progress.progress((idx+1)/tot)
-                st.success("Salvato!")
+                    prog.progress((idx+1)/tot)
+                st.success("Aggiornato!")
                 time.sleep(1)
                 st.rerun()
                 
-            if c_save2.button("✅ SALVA E CHIUDI TUTTO", type="primary"):
-                progress = st.progress(0)
+            if c_s2.button("✅ CHIUDI TUTTO", type="primary"):
+                prog = st.progress(0)
                 tot = len(edited_resume)
                 for idx, row in edited_resume.iterrows():
                     cell = ws_db.find(str(row['ID_Univoco']))
@@ -431,15 +436,15 @@ if menu == "1. Misurazione (Day 0)":
                     ws_db.update_cell(r, 19, row['SMR_2'])
                     ws_db.update_cell(r, 23, row['Note'])
                     ws_db.update_cell(r, 25, "CHIUSO")
-                    progress.progress((idx+1)/tot)
+                    prog.progress((idx+1)/tot)
                 st.balloons()
-                st.success("Completato!")
+                st.success("Chiuso!")
                 time.sleep(1.5)
                 st.session_state.work_mode = "NEW"
                 st.rerun()
 
 # =============================================================================
-# SEZIONE 2: PESI (DAY 3)
+# SEZIONE 2: PESI
 # =============================================================================
 elif menu == "2. Pesi (Day 3)":
     st.header("Inserimento Dry Weight")
@@ -448,9 +453,8 @@ elif menu == "2. Pesi (Day 3)":
     
     if not df.empty:
         to_update = df[ pd.to_numeric(df['Dry_Weight'], errors='coerce').isna() ].copy()
-        
         if to_update.empty:
-            st.info("Tutti i pesi sono stati inseriti.")
+            st.info("Nessun peso mancante.")
         else:
             projs = sorted(list(set(to_update['Project_Name'].astype(str))))
             sel_proj = st.selectbox("Filtra Progetto", ["Tutti"] + projs)
@@ -475,11 +479,11 @@ elif menu == "2. Pesi (Day 3)":
                             cnt += 1
                         except: pass
                     prog.progress((i+1)/len(edited_dw))
-                st.success(f"Aggiornati {cnt} pesi.")
+                st.success(f"Fatto ({cnt} pesi).")
                 time.sleep(1)
                 st.rerun()
     else:
-        st.info("Database vuoto.")
+        st.info("DB vuoto.")
 
 # =============================================================================
 # SEZIONE 3: EXPORT
@@ -490,13 +494,11 @@ elif menu == "3. Export Dati":
     df = pd.DataFrame(ws_db.get_all_records())
     
     if not df.empty and 'Custom_Tags_JSON' in df.columns:
-        st.write("Anteprima Dati (Tags espansi):")
+        st.write("Anteprima (Tags Espansi):")
         tags_list = []
         for x in df['Custom_Tags_JSON']:
-            try:
-                tags_list.append(json.loads(x))
-            except:
-                tags_list.append({})
+            try: tags_list.append(json.loads(x))
+            except: tags_list.append({})
         tags_df = pd.json_normalize(tags_list)
         df_final = pd.concat([df.drop('Custom_Tags_JSON', axis=1), tags_df], axis=1)
         st.dataframe(df_final)
