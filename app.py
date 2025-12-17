@@ -272,27 +272,49 @@ if menu == "1. Misurazione (Day 0)":
         st.write("---")
         st.write("###### 🏷️ Filtri / Categorie Extra")
         
-        # GESTIONE FILTRI DINAMICA (MULTISELECT)
-        # Permette di aggiungere, rimuovere e selezionare da lista esistente
-        selected_tags = st.multiselect(
-            "Aggiungi o Rimuovi Parametri:",
-            options=st.session_state.all_possible_tags, # Suggerisce tutti quelli usati nel DB
-            default=st.session_state.active_tags,       # Pre-seleziona quelli del progetto
-            placeholder="Seleziona o scrivi e premi Invio..."
-        )
+        # --- CORREZIONE: GESTIONE AGGIUNTA NUOVI PARAMETRI ---
         
-        # Aggiorniamo lo stato con la selezione corrente
-        st.session_state.active_tags = selected_tags
+        # 1. Casella per CREARE nuovi parametri che non esistono ancora
+        col_new, col_exist = st.columns([1, 2])
         
-        # Renderizza Input Dinamici
+        with col_new:
+            # Usiamo un form per permettere l'invio col tasto Enter e pulire il campo
+            with st.form("add_tag_form", clear_on_submit=True):
+                new_tag_input = st.text_input("➕ Crea Nuovo Parametro", placeholder="Scrivi e premi Invio")
+                submit_new = st.form_submit_button("Aggiungi")
+                
+                if submit_new and new_tag_input:
+                    # Aggiungi alla lista dei possibili se non c'è
+                    if new_tag_input not in st.session_state.all_possible_tags:
+                        st.session_state.all_possible_tags.append(new_tag_input)
+                    # Aggiungi ai tag attivi se non c'è
+                    if new_tag_input not in st.session_state.active_tags:
+                        st.session_state.active_tags.append(new_tag_input)
+                        st.rerun()
+
+        with col_exist:
+            # 2. Multiselect per SELEZIONARE o RIMUOVERE quelli attivi
+            current_selection = st.multiselect(
+                "Parametri Attivi (Gestisci):",
+                options=st.session_state.all_possible_tags,
+                default=st.session_state.active_tags,
+                placeholder="Seleziona dalla lista..."
+            )
+            
+            # Sincronizza lo stato se l'utente rimuove un tag dalla X del multiselect
+            if current_selection != st.session_state.active_tags:
+                st.session_state.active_tags = current_selection
+                st.rerun()
+
+        # Renderizza Input Dinamici per i valori
         dynamic_values = {}
         if st.session_state.active_tags:
+            st.caption("Inserisci i valori per i parametri selezionati:")
             cols_dyn = st.columns(4)
             for i, tag in enumerate(st.session_state.active_tags):
                 with cols_dyn[i % 4]:
                     val = st.text_input(f"{tag}", key=f"dyn_{tag}")
                     dynamic_values[tag] = val
-
         st.markdown("---")
 
         # D. Tabelle
